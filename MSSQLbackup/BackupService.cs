@@ -15,8 +15,6 @@ using System.Threading.Tasks;
 
 namespace MSSQLbackup
 {
-    
-
     public class BackupService
     {
         ILog log = LogManager.GetLogger(typeof(BackupService));
@@ -49,7 +47,7 @@ namespace MSSQLbackup
             if (!Directory.Exists(previousBackupsTempDir))
                 Directory.CreateDirectory(previousBackupsTempDir);
 
-            currentDate = DateTime.Now;
+            currentDate = DateTime.Now.AddDays(+2);
             currentDateString = currentDate.ToString("yyyy-MM-dd");
 
             log.InfoFormat("Backup started");
@@ -73,6 +71,8 @@ namespace MSSQLbackup
             Backup bkpDBFull = new Backup();
             /* Specify whether you want to back up database or files or log */
             bkpDBFull.Action = BackupActionType.Database;
+            if (backupSettings.FullBackupDay.HasValue && backupSettings.FullBackupDay != currentDate.DayOfWeek)
+                bkpDBFull.Incremental = true;
             /* Specify the name of the database to back up */
             bkpDBFull.Database = dbName;
 
@@ -82,6 +82,10 @@ namespace MSSQLbackup
             bkpDBFull.Initialize = false;
             bkpDBFull.SqlBackup(myServer);
 
+            if (backupSettings.FullBackupDay != currentDate.DayOfWeek)
+                log.InfoFormat("Backup incremental {0}", dbName);
+            else
+                log.InfoFormat("Backup full {0}", dbName);
         }
 
         void ZipAndEncryptFile(string zipFileName, string originalFilePath, string encryptionKey)
@@ -198,58 +202,39 @@ namespace MSSQLbackup
                 var newestBackupFilePath = String.Empty;
                 var previousBackups = FindOlderBackupsFileNames(dbName, zipFilePath);
                 //Create backup conditionaly if creating only if something changed in the database and current date is not full backup day
-                if (backupSettings.CreateOnlyIfThereWereChanges &&
-                    backupSettings.FullBackupDay != currentDate.DayOfWeek)
-                {
-                    var lastBackup = previousBackups.FirstOrDefault(x => x.Item1 == previousBackups.Max(y => y.Item1));
-                    if (lastBackup != null)
-                    {
-                        var lastBackupCompressedFullPath = Path.Combine(backupSettings.LocalBackupPath, lastBackup.Item2);
-                        ExtractZipFile(lastBackupCompressedFullPath, backupSettings.EncryptionKey, previousBackupsTempDir);
-
-                        var previousBackupFileFullPath = Directory.GetFiles(previousBackupsTempDir).First();
-                        var lastBackupFileInfo = new FileInfo(Directory.GetFiles(previousBackupsTempDir).First());
-                        var currentBackupFileInfo = new FileInfo(backupFilePath);
-
-                        if (lastBackupFileInfo.Length != currentBackupFileInfo.Length)
-                        {
-                            log.InfoFormat("Archiving {0} as {1}", dbName, Path.GetFileName(zipFilePath));
-                            ZipAndEncryptFile(zipFilePath, backupFilePath, backupSettings.EncryptionKey);
-                            newestBackupFilePath = zipFilePath;
-                        }
-                        else
-                        {
-                            newestBackupFilePath = lastBackupCompressedFullPath;
-                        }
-                        File.Delete(previousBackupFileFullPath);
-                    }
-                    else {
-                        log.InfoFormat("Archiving {0} as {1}", dbName, Path.GetFileName(zipFilePath));
-                        ZipAndEncryptFile(zipFilePath, backupFilePath, backupSettings.EncryptionKey);
-                        newestBackupFilePath = zipFilePath;
-                    }
-                }
-                else {
-                    log.InfoFormat("Archiving {0} as {1}", dbName, Path.GetFileName(zipFilePath));
-                    ZipAndEncryptFile(zipFilePath, backupFilePath, backupSettings.EncryptionKey);
-                    newestBackupFilePath = zipFilePath;
-                }
                 
-                File.Delete(backupFilePath);
+                ZipAndEncryptFile(zipFilePath, backupFilePath, backupSettings.EncryptionKey);
+                newestBackupFilePath = zipFilePath;
+                log.InfoFormat("Archiving {0} as {1}", dbName, Path.GetFileName(zipFilePath));
 
+                File.Delete(backupFilePath);
                 if (backupSettings.DeleteOldBackups)
                 {
                     var newestBackupFileName = Path.GetFileName(newestBackupFilePath);
                     if (backupSettings.FullBackupDay.HasValue)
                     {
-                        previousBackups = previousBackups.Where(x => x.Item1.DayOfWeek != backupSettings.FullBackupDay.Value).ToList();
+                        if (backupSettings.FullBackupDay == currentDate.DayOfWeek)
+                        {
+                            previousBackups = previousBackups.Where(x => x.Item1.DayOfWeek != backupSettings.FullBackupDay.Value).ToList();
+                            foreach (var previousBackup in previousBackups.Where(x => x.Item2 != newestBackupFileName))
+                            {
+                                if (previousBackup.Item1.DayOfWeek != backupSettings.FullBackupDay.Value)
+                                {
+                                    var previousBackupFullPath = Path.Combine(backupSettings.LocalBackupPath, previousBackup.Item2);
+                                    File.Delete(previousBackupFullPath);
+                                    log.InfoFormat("Deleted {0}", Path.GetFileName(previousBackupFullPath));
+                                }
+                            }
+                        }
                     }
-
-                    foreach (var previousBackup in previousBackups.Where(x=>x.Item2 != newestBackupFileName))
+                    else
                     {
-                        var previousBackupFullPath = Path.Combine(backupSettings.LocalBackupPath, previousBackup.Item2);
-                        File.Delete(previousBackupFullPath);
-                        log.InfoFormat("Deleted {0}", Path.GetFileName(previousBackupFullPath));
+                        foreach (var previousBackup in previousBackups.Where(x => x.Item2 != newestBackupFileName))
+                        {
+                            var previousBackupFullPath = Path.Combine(backupSettings.LocalBackupPath, previousBackup.Item2);
+                            File.Delete(previousBackupFullPath);
+                            log.InfoFormat("Deleted {0}", Path.GetFileName(previousBackupFullPath));
+                        }
                     }
                 }
 
