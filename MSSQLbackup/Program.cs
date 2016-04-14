@@ -23,7 +23,10 @@ namespace MSSQLbackup
                     DbServerHostname = ConfigurationManager.AppSettings.Get("SQLServerHostname"),
                     LocalBackupPath = ConfigurationManager.AppSettings.Get("BackupPath"),
                     EncryptionKey = ConfigurationManager.AppSettings.Get("EncryptionKey"),
-                    LocalBackupTempPath = ConfigurationManager.AppSettings.Get("BackupTempPath")
+                    LocalBackupTempPath = ConfigurationManager.AppSettings.Get("BackupTempPath"),
+                    DeleteOldBackups = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("DeleteOldBackups")),
+                    CreateOnlyIfThereWereChanges = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("CreateOnlyIfThereWereChanges")),
+                    FullBackupDay = DayOfWeek.Sunday
                 };
 
                 var backupService = new BackupService(backupSettings);

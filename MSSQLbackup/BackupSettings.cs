@@ -20,8 +20,6 @@ namespace MSSQLbackup
         //Setting for deleting old backups of the same database
         public bool DeleteOldBackups { get; set; }
         //Setting for 
-        public bool CreateOnlyIfThereWereChanges { get; set; }
-
-        public string BackupDate { get; set; }
+        public DayOfWeek? FullBackupDay { get; set; }
     }
 }
