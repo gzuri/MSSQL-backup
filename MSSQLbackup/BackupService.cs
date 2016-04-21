@@ -8,6 +8,7 @@ using System.Collections.Generic;
 using System.Configuration;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -20,9 +21,10 @@ namespace MSSQLbackup
         ILog log = LogManager.GetLogger(typeof(BackupService));
 
         List<string> IGNORE_DATABASES = new List<string> { "master", "msdb", "tempdb", "model" };
-        String previousBackupsTempDir;
         DateTime currentDate;
         String currentDateString;
+        String tempBackupFolderPath;
+
         Server myServer;
         BackupSettings backupSettings;
         public BackupService(BackupSettings backupSettings)
@@ -36,18 +38,15 @@ namespace MSSQLbackup
             if (!Directory.Exists(backupSettings.LocalBackupPath))
                 Directory.CreateDirectory(backupSettings.LocalBackupPath);
 
-            if (String.IsNullOrWhiteSpace(backupSettings.LocalBackupTempPath))
-                backupSettings.LocalBackupTempPath = Path.Combine(backupSettings.LocalBackupPath, "temp");
+            if (!String.IsNullOrWhiteSpace(backupSettings.LocalBackupTempPath))
+                tempBackupFolderPath = backupSettings.LocalBackupTempPath;
+            else
+                tempBackupFolderPath = Path.Combine(backupSettings.LocalBackupPath, "temp");
 
-            if (!Directory.Exists(Path.Combine(backupSettings.LocalBackupTempPath)))
-                Directory.CreateDirectory(backupSettings.LocalBackupTempPath);
+            if (!Directory.Exists(tempBackupFolderPath))
+                Directory.CreateDirectory(tempBackupFolderPath);
 
-            previousBackupsTempDir = Path.Combine(backupSettings.LocalBackupTempPath, "previous");
-
-            if (!Directory.Exists(previousBackupsTempDir))
-                Directory.CreateDirectory(previousBackupsTempDir);
-
-            currentDate = DateTime.Now.AddDays(+2);
+            currentDate = DateTime.Now.AddDays(0);
             currentDateString = currentDate.ToString("yyyy-MM-dd");
 
             log.InfoFormat("Backup started");
@@ -71,8 +70,7 @@ namespace MSSQLbackup
             Backup bkpDBFull = new Backup();
             /* Specify whether you want to back up database or files or log */
             bkpDBFull.Action = BackupActionType.Database;
-            if (backupSettings.FullBackupDay.HasValue && backupSettings.FullBackupDay != currentDate.DayOfWeek)
-                bkpDBFull.Incremental = true;
+            
             /* Specify the name of the database to back up */
             bkpDBFull.Database = dbName;
 
@@ -82,10 +80,7 @@ namespace MSSQLbackup
             bkpDBFull.Initialize = false;
             bkpDBFull.SqlBackup(myServer);
 
-            if (backupSettings.FullBackupDay != currentDate.DayOfWeek)
-                log.InfoFormat("Backup incremental {0}", dbName);
-            else
-                log.InfoFormat("Backup full {0}", dbName);
+            log.InfoFormat("Backup full {0}", dbName);
         }
 
         void ZipAndEncryptFile(string zipFileName, string originalFilePath, string encryptionKey)
@@ -124,56 +119,6 @@ namespace MSSQLbackup
                 zipStream.Close();
             }
         }
-
-        void ExtractZipFile(string zipFileName, string password, string outFolder)
-        {
-            ZipFile zf = null;
-            try
-            {
-                FileStream fs = File.OpenRead(zipFileName);
-                zf = new ZipFile(fs);
-                if (!String.IsNullOrEmpty(password))
-                {
-                    zf.Password = password;     // AES encrypted entries are handled automatically
-                }
-                foreach (ZipEntry zipEntry in zf)
-                {
-                    if (!zipEntry.IsFile)
-                    {
-                        continue;           // Ignore directories
-                    }
-                    String entryFileName = zipEntry.Name;
-                    // to remove the folder from the entry:- entryFileName = Path.GetFileName(entryFileName);
-                    // Optionally match entrynames against a selection list here to skip as desired.
-                    // The unpacked length is available in the zipEntry.Size property.
-
-                    byte[] buffer = new byte[4096];     // 4K is optimum
-                    Stream zipStream = zf.GetInputStream(zipEntry);
-
-                    // Manipulate the output filename here as desired.
-                    String fullZipToPath = Path.Combine(outFolder, entryFileName);
-                    string directoryName = Path.GetDirectoryName(fullZipToPath);
-                    if (directoryName.Length > 0)
-                        Directory.CreateDirectory(directoryName);
-
-                    // Unzip file in buffered chunks. This is just as fast as unpacking to a buffer the full size
-                    // of the file, but does not waste memory.
-                    // The "using" will close the stream even if an exception occurs.
-                    using (FileStream streamWriter = File.Create(fullZipToPath))
-                    {
-                        StreamUtils.Copy(zipStream, streamWriter, buffer);
-                    }
-                }
-            }
-            finally
-            {
-                if (zf != null)
-                {
-                    zf.IsStreamOwner = true; // Makes close also shut the underlying stream
-                    zf.Close(); // Ensure we release resources
-                }
-            }
-        }
         
         void UploadArchiveToAzure(string fileName)
         {
@@ -185,11 +130,45 @@ namespace MSSQLbackup
             blobBlockInContainer.UploadFromFile(fileName, FileMode.Open);
         }
 
+        void UploadArchiveToFtp(string dbName, string fileName)
+        {
+            try
+            {
+                FtpWebRequest request = (FtpWebRequest)WebRequest.Create(backupSettings.FtpUrl + Path.GetFileName(fileName));
+                request.Method = WebRequestMethods.Ftp.UploadFile;
+
+                if (!String.IsNullOrWhiteSpace(backupSettings.FtpUsername))
+                    request.Credentials = new NetworkCredential(backupSettings.FtpUsername, backupSettings.FtpPassword);
+                else
+                    request.Credentials = new NetworkCredential("anonymous", "janeDoe@contoso.com");
+
+                // Copy the contents of the file to the request stream.
+                StreamReader sourceStream = new StreamReader(fileName);
+                byte[] fileContents = Encoding.UTF8.GetBytes(sourceStream.ReadToEnd());
+                sourceStream.Close();
+                request.ContentLength = fileContents.Length;
+
+                Stream requestStream = request.GetRequestStream();
+                requestStream.Write(fileContents, 0, fileContents.Length);
+                requestStream.Close();
+
+                FtpWebResponse response = (FtpWebResponse)request.GetResponse();
+
+                log.InfoFormat("Uploaded db {0} to FTP", dbName);
+
+                response.Close();
+            }
+            catch (Exception e)
+            {
+                log.FatalFormat("DB {0} couldn't be uploaded to FTP because {1}", dbName, e.Message)
+            }
+        }
+
         void BackupSingleDatabase(String dbName)
         {
             try
             {
-                var backupFilePath = Path.Combine(backupSettings.LocalBackupTempPath, dbName + ".bak");
+                var backupFilePath = Path.Combine(tempBackupFolderPath, dbName + ".bak");
                 var zipFilePath = Path.Combine(backupSettings.LocalBackupPath, dbName + "-" + currentDateString + ".zip");
 
                 if (File.Exists(backupFilePath))
@@ -199,97 +178,52 @@ namespace MSSQLbackup
                     File.Delete(zipFilePath);
 
                 CreateDatabaseBackup(backupFilePath, dbName);
-                var newestBackupFilePath = String.Empty;
-                var previousBackups = FindOlderBackupsFileNames(dbName, zipFilePath);
-                //Create backup conditionaly if creating only if something changed in the database and current date is not full backup day
-                
+
                 ZipAndEncryptFile(zipFilePath, backupFilePath, backupSettings.EncryptionKey);
-                newestBackupFilePath = zipFilePath;
                 log.InfoFormat("Archiving {0} as {1}", dbName, Path.GetFileName(zipFilePath));
 
                 File.Delete(backupFilePath);
-                if (backupSettings.DeleteOldBackups)
-                {
-                    var newestBackupFileName = Path.GetFileName(newestBackupFilePath);
-                    if (backupSettings.FullBackupDay.HasValue)
-                    {
-                        if (backupSettings.FullBackupDay == currentDate.DayOfWeek)
-                        {
-                            previousBackups = previousBackups.Where(x => x.Item1.DayOfWeek != backupSettings.FullBackupDay.Value).ToList();
-                            foreach (var previousBackup in previousBackups.Where(x => x.Item2 != newestBackupFileName))
-                            {
-                                if (previousBackup.Item1.DayOfWeek != backupSettings.FullBackupDay.Value)
-                                {
-                                    var previousBackupFullPath = Path.Combine(backupSettings.LocalBackupPath, previousBackup.Item2);
-                                    File.Delete(previousBackupFullPath);
-                                    log.InfoFormat("Deleted {0}", Path.GetFileName(previousBackupFullPath));
-                                }
-                            }
-                        }
-                    }
-                    else
-                    {
-                        foreach (var previousBackup in previousBackups.Where(x => x.Item2 != newestBackupFileName))
-                        {
-                            var previousBackupFullPath = Path.Combine(backupSettings.LocalBackupPath, previousBackup.Item2);
-                            File.Delete(previousBackupFullPath);
-                            log.InfoFormat("Deleted {0}", Path.GetFileName(previousBackupFullPath));
-                        }
-                    }
-                }
 
                 if (!String.IsNullOrWhiteSpace(backupSettings.AzureTableSorageConnectionString)
                     && !String.IsNullOrWhiteSpace(backupSettings.AzureBlobContainer))
                     UploadArchiveToAzure(zipFilePath);
 
+                if (!String.IsNullOrWhiteSpace(backupSettings.FtpUrl))
+                    UploadArchiveToFtp(dbName, zipFilePath);
+
+            }
+            catch (FailedOperationException e)
+            {
+                log.InfoFormat("Database {0} is offline", dbName);
             }
             catch (Exception e)
             {
-                log.FatalFormat("Can't backup {0} with message {1}",dbName, e.Message);
+                log.FatalFormat("Can't backup {0} with message {1}", dbName, e.Message);
             }
         }
-
-        List<Tuple<DateTime, string>> FindOlderBackupsFileNames(string dbName, string currentBackup)
-        {
-            var currentBackupFileName = Path.GetFileName(currentBackup);
-            var previousBackups = new List<string>();
-            foreach (var file in Directory.GetFiles(backupSettings.LocalBackupPath))
-            {
-                var fileName = Path.GetFileName(file);
-
-                if (Regex.IsMatch(Path.GetFileNameWithoutExtension(fileName), dbName + "-[0-9]{4}-[0-9]{2}-[0-9]{2}")
-                    && fileName != currentBackupFileName)
-                {
-                    previousBackups.Add(fileName);
-                }
-            }
-
-            var sortedBackupList = new List<Tuple<DateTime, string>>();
-            //Order previous backups
-            foreach (var item in previousBackups)
-            {
-                var el = Path.GetFileNameWithoutExtension(item).Split('-');
-                var date = new DateTime(Convert.ToInt32(el[1]), Convert.ToInt32(el[2]), Convert.ToInt32(el[3]));
-                sortedBackupList.Add(Tuple.Create(date, item));
-            }
-            
-            return sortedBackupList;
-        }
-
+        
         public void DoBackup()
         {
-            var databasesToBackup = GetDbNamesForBackup();
-
-            foreach (var item in databasesToBackup)
+            try
             {
-                BackupSingleDatabase(item);
+                if (backupSettings.DeleteOldBackups)
+                {
+                    var files = Directory.GetFiles(backupSettings.LocalBackupPath);
+                    foreach (var item in files)
+                        File.Delete(item);
+                }
+
+                var databasesToBackup = GetDbNamesForBackup();
+                foreach (var item in databasesToBackup)
+                {
+                    BackupSingleDatabase(item);
+                }
             }
+            catch (Exception e)
+            {
+                log.FatalFormat("Can't backup with message {0}", e.Message);
 
-            foreach (var file in Directory.GetFiles(backupSettings.LocalBackupTempPath))
-                File.Delete(file);
-
-            //if (Directory.Exists(backupSettings.LocalBackupTempPath))
-            //    Directory.Delete(backupSettings.LocalBackupTempPath);
+            }
         }
     }
 }

@@ -25,8 +25,10 @@ namespace MSSQLbackup
                     EncryptionKey = ConfigurationManager.AppSettings.Get("EncryptionKey"),
                     LocalBackupTempPath = ConfigurationManager.AppSettings.Get("BackupTempPath"),
                     DeleteOldBackups = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("DeleteOldBackups")),
-                    CreateOnlyIfThereWereChanges = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("CreateOnlyIfThereWereChanges")),
-                    FullBackupDay = DayOfWeek.Sunday
+                    AddDateToArchive = Convert.ToBoolean(ConfigurationManager.AppSettings.Get("AddDateToArchive")),
+                    FtpUrl = ConfigurationManager.AppSettings.Get("FtpUrl"),
+                    FtpUsername = ConfigurationManager.AppSettings.Get("FtpUsername"),
+                    FtpPassword = ConfigurationManager.AppSettings.Get("FtpPassword")
                 };
 
                 var backupService = new BackupService(backupSettings);
