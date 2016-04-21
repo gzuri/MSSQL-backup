@@ -134,25 +134,36 @@ namespace MSSQLbackup
         {
             try
             {
-                FtpWebRequest request = (FtpWebRequest)WebRequest.Create(backupSettings.FtpUrl + Path.GetFileName(fileName));
-                request.Method = WebRequestMethods.Ftp.UploadFile;
+                FtpWebRequest ftpClient = (FtpWebRequest)WebRequest.Create(backupSettings.FtpUrl + Path.GetFileName(fileName));
+                ftpClient.UseBinary = true;
+                ftpClient.KeepAlive = true;
+                ftpClient.Method = WebRequestMethods.Ftp.UploadFile;
+
 
                 if (!String.IsNullOrWhiteSpace(backupSettings.FtpUsername))
-                    request.Credentials = new NetworkCredential(backupSettings.FtpUsername, backupSettings.FtpPassword);
+                    ftpClient.Credentials = new NetworkCredential(backupSettings.FtpUsername, backupSettings.FtpPassword);
                 else
-                    request.Credentials = new NetworkCredential("anonymous", "janeDoe@contoso.com");
+                    ftpClient.Credentials = new NetworkCredential("anonymous", "janeDoe@contoso.com");
 
-                // Copy the contents of the file to the request stream.
-                StreamReader sourceStream = new StreamReader(fileName);
-                byte[] fileContents = Encoding.UTF8.GetBytes(sourceStream.ReadToEnd());
-                sourceStream.Close();
-                request.ContentLength = fileContents.Length;
+                
+                System.IO.FileInfo fi = new System.IO.FileInfo(fileName);
+                ftpClient.ContentLength = fi.Length;
+                byte[] buffer = new byte[4097];
+                int bytes = 0;
+                int total_bytes = (int)fi.Length;
+                System.IO.FileStream fs = fi.OpenRead();
+                System.IO.Stream rs = ftpClient.GetRequestStream();
+                while (total_bytes > 0)
+                {
+                    bytes = fs.Read(buffer, 0, buffer.Length);
+                    rs.Write(buffer, 0, bytes);
+                    total_bytes = total_bytes - bytes;
+                }
+                //fs.Flush();
+                fs.Close();
+                rs.Close();
 
-                Stream requestStream = request.GetRequestStream();
-                requestStream.Write(fileContents, 0, fileContents.Length);
-                requestStream.Close();
-
-                FtpWebResponse response = (FtpWebResponse)request.GetResponse();
+                FtpWebResponse response = (FtpWebResponse)ftpClient.GetResponse();
 
                 log.InfoFormat("Uploaded db {0} to FTP", dbName);
 
@@ -160,7 +171,7 @@ namespace MSSQLbackup
             }
             catch (Exception e)
             {
-                log.FatalFormat("DB {0} couldn't be uploaded to FTP because {1}", dbName, e.Message)
+                log.FatalFormat("DB {0} couldn't be uploaded to FTP because {1}", dbName, e.Message);
             }
         }
 
@@ -170,7 +181,8 @@ namespace MSSQLbackup
             {
                 var backupFilePath = Path.Combine(tempBackupFolderPath, dbName + ".bak");
                 var zipFilePath = Path.Combine(backupSettings.LocalBackupPath, dbName + "-" + currentDateString + ".zip");
-
+                if (!backupSettings.AddDateToArchive)
+                    zipFilePath = Path.Combine(backupSettings.LocalBackupPath, dbName + ".zip");
                 if (File.Exists(backupFilePath))
                     File.Delete(backupFilePath);
 
